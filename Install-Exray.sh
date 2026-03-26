@@ -1,147 +1,81 @@
 #!/bin/bash
-# ARISG TUNNEL V4 - XRAY MANAGER INSTALLER
-# Support Ubuntu 22 / 23 / 24
-set -e
+# V2Ray Mini Core Version 4.42.2
+# Script By gandring
+# @ Copyrigt 2021 By gandring
+# =====================================================
 
-# --- Fungsi bantu ---
-function info() {
-    echo -e "\e[34m[INFO]\e[0m $1"
-}
-function warning() {
-    echo -e "\e[33m[WARN]\e[0m $1"
-}
-function error() {
-    echo -e "\e[31m[ERROR]\e[0m $1"
-}
+# Color
+RED='\033[0;31m'
+NC='\033[0m'
+GREEN='\033[32;0m'
+ORANGE='\033[0;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+LIGHT='\033[0;37m'
 
-function cek_root() {
-    if [[ "$EUID" -ne 0 ]]; then
-        error "Jalankan skrip ini sebagai root (sudo)."
-        exit 1
-    fi
-}
+IP=$(wget -qO- ipinfo.io/ip);
+echo -e "checking vps"
+domain=$(cat /root/domain)
+apt install iptables iptables-persistent -y
+apt install curl socat xz-utils wget apt-transport-https gnupg gnupg2 gnupg1 dnsutils lsb-release -y 
+apt install socat cron bash-completion ntpdate -y
+ntpdate pool.ntp.org
+apt -y install chrony
+timedatectl set-ntp true
+systemctl enable chronyd && systemctl restart chronyd
+systemctl enable chrony && systemctl restart chrony
+timedatectl set-timezone Asia/Kuala_Lumpur
+chronyc sourcestats -v
+chronyc tracking -v
+date
 
-function install_dependencies() {
-    info "Update repository dan install dependensi dasar..."
-    apt update && apt upgrade -y
-    apt install -y curl socat cron bash jq lsof net-tools unzip nginx certbot iptables-persistent
-}
+# / / Ambil Xray Core Version Terbaru
+latest_version="$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases | grep tag_name | sed -E 's/.*"v(.*)".*/\1/' | head -n 1)"
 
-function install_xray() {
-    info "Download dan install Xray-core versi terbaru..."
-    XRAY_BIN="/usr/local/bin/xray"
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-    URL="https://github.com/XTLS/Xray-core/releases/download/${LATEST_VERSION}/Xray-linux-64.zip"
+# / / Installation Xray Core
+xraycore_link="https://github.com/XTLS/Xray-core/releases/download/v$latest_version/xray-linux-64.zip"
 
-    wget -q -O /tmp/xray.zip $URL
-    unzip -o /tmp/xray.zip -d /usr/local/bin/
-    chmod +x $XRAY_BIN
-    rm -f /tmp/xray.zip
+# / / Make Main Directory
+mkdir -p /usr/bin/xray
+mkdir -p /etc/xray
 
-    info "Xray core versi $LATEST_VERSION berhasil diinstall."
-}
+# / / Unzip Xray Linux 64
+cd `mktemp -d`
+curl -sL "$xraycore_link" -o xray.zip
+unzip -q xray.zip && rm -rf xray.zip
+mv xray /usr/local/bin/xray
+chmod +x /usr/local/bin/xray
 
-function setup_nginx() {
-    info "Konfigurasi Nginx sebagai Reverse Proxy..."
+# Make Folder XRay
+mkdir -p /var/log/xray/
+touch /etc/xray/xray.pid
 
-    # Stop nginx dulu kalau sudah jalan
-    systemctl stop nginx
-    systemctl disable nginx
-
-    # Buat file konfigurasi Nginx untuk domain dan proxy websocket
-    cat > /etc/nginx/sites-available/xray.conf << EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${DOMAIN};
-
-    root /var/www/html;
-    index index.html index.htm;
-
-    location / {
-        # Optionally buat halaman empty agar port 80 dapat response
-        try_files \$uri \$uri/ =404;
-    }
-
-    location /vmess {
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:10000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-
-    location /vless {
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:10001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-}
-EOF
-
-    ln -sf /etc/nginx/sites-available/xray.conf /etc/nginx/sites-enabled/xray.conf
-    # Remove default if exists
-    rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
-
-    nginx -t
-    systemctl enable nginx
-    systemctl restart nginx
-    info "Nginx siap sebagai reverse proxy tanpa TLS (port 80)."
-}
-
-function setup_certbot_tls() {
-    info "Memasang sertifikat SSL TLS otomatis dengan certbot..."
-
-    # Pasang sertifikat menggunakan standalone mode untuk domain yang sudah diarahkan
-    certbot certonly --standalone -d ${DOMAIN} --non-interactive --agree-tos -m ${EMAIL} || {
-        warning "Certbot gagal memasang SSL. Pastikan domain sudah diarahkan dan port 80 belum terpakai saat instalasi."
-        return 1
-    }
-
-    # Setup renew certbot otomatis dengan cron (harus ada service certbot di sistem ubuntu)
-    echo "0 3 * * * root certbot renew --quiet && systemctl restart xray nginx" >/etc/cron.d/certbot-renew
-
-    info "SSL certificate terpasang di /etc/letsencrypt/live/${DOMAIN}/"
-}
-
-function setup_xray_config() {
-    info "Membuat konfigurasi Xray dengan VMess dan VLess WebSocket + TLS + port TCP lainnya..."
-
-    UUID_VLESS=$(uuidgen)
-    UUID_VMESS=$(uuidgen)
-
-    mkdir -p /usr/local/etc/xray
-
-    cat > /usr/local/etc/xray/config.json << EOF
+mkdir /root/.acme.sh
+curl https://acme-install.netlify.app/acme.sh -o /root/.acme.sh/acme.sh
+chmod +x /root/.acme.sh/acme.sh
+/root/.acme.sh/acme.sh --issue -d $domain --standalone -k ec-256
+~/.acme.sh/acme.sh --installcert -d $domain --fullchainpath /etc/xray/xray.crt --keypath /etc/xray/xray.key --ecc
+service squid start
+uuid=$(cat /proc/sys/kernel/random/uuid)
+# Buat Config Xray TLS
+cat > /etc/xray/v2ray-tls.json << END
 {
   "log": {
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log",
-    "loglevel": "warning"
+    "access": "/var/log/xray/v2ray-login.log",
+    "error": "/var/log/xray/v2ray-error.log",
+    "loglevel": "info"
   },
   "inbounds": [
     {
-      "port": 443,
-      "protocol": "vless",
+      "port": 2096,
+      "protocol": "vmess",
       "settings": {
         "clients": [
           {
-            "id": "${UUID_VLESS}",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
-        "decryption": "none",
-        "fallbacks": [
-          {
-            "dest": 80
+            "id": "${uuid}",
+            "alterId": 0
+#xray-v2ray-tls
           }
         ]
       },
@@ -151,77 +85,214 @@ function setup_xray_config() {
         "tlsSettings": {
           "certificates": [
             {
-              "certificateFile": "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem",
-              "keyFile": "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+              "certificateFile": "/etc/xray/xray.crt",
+              "keyFile": "/etc/xray/xray.key"
             }
-          ],
-          "alpn": ["h2","http/1.1"]
+          ]
         },
         "wsSettings": {
-          "path": "/vless"
+          "path": "/gandring",
+          "headers": {
+            "Host": ""
+          }
+         },
+        "quicSettings": {},
+        "sockopt": {
+          "mark": 0,
+          "tcpFastOpen": true
         }
-      }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
+      },
+      "domain": "$domain"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
     },
     {
-      "port": 10000,
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  }
+}
+END
+cat > /etc/xray/v2ray-nontls.json << END
+{
+  "log": {
+    "access": "/var/log/xray/v2ray-login.log",
+    "error": "/var/log/xray/v2ray-error.log",
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 2095,
       "protocol": "vmess",
       "settings": {
         "clients": [
           {
-            "id": "${UUID_VMESS}",
+            "id": "${uuid}",
             "alterId": 0
+#xray-v2ray-nontls
           }
         ]
       },
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/vmess"
-        }
-      }
-    },
-    {
-      "port": 65535,
-      "protocol": "vmess",
-      "settings": {
-        "clients": [
-          {
-            "id": "${UUID_VMESS}",
-            "alterId": 0
+          "path": "/gandring",
+          "headers": {
+            "Host": ""
           }
+         },
+        "quicSettings": {},
+        "sockopt": {
+          "mark": 0,
+          "tcpFastOpen": true
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
         ]
       },
-      "streamSettings": {
-        "network": "tcp"
-      }
+      "domain": "$domain"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
     },
     {
-      "port": 7300,
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  }
+}
+END
+cat > /etc/xray/vless-tls.json << END
+{
+  "log": {
+    "access": "/var/log/xray/vless-login.log",
+    "error": "/var/log/xray/vless-error.log",
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 443,
       "protocol": "vless",
       "settings": {
         "clients": [
           {
-            "id": "${UUID_VLESS}"
+            "id": "${uuid}"
+#xray-vless-tls
           }
         ],
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp"
-      }
-    },
-    {
-      "port": 7100,
-      "protocol": "trojan",
-      "settings": {
-        "clients": [
-          {
-            "password": "trojanpass123"
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/xray/xray.crt",
+              "keyFile": "/etc/xray/xray.key"
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "/gandring",
+          "headers": {
+            "Host": ""
           }
-        ]
+         },
+        "quicSettings": {},
+        "sockopt": {
+          "mark": 0,
+          "tcpFastOpen": true
+        }
       },
-      "streamSettings": {
-        "network": "tcp"
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
       }
     }
   ],
@@ -229,103 +300,545 @@ function setup_xray_config() {
     {
       "protocol": "freedom",
       "settings": {}
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
     }
-  ]
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  }
 }
-EOF
-    info "Config Xray di /usr/local/etc/xray/config.json telah dibuat."
-    echo "UUID VLESS: $UUID_VLESS"
-    echo "UUID VMess: $UUID_VMESS"
-    echo "Password Trojan: trojanpass123"
+END
+cat > /etc/xray/vless-nontls.json << END
+{
+  "log": {
+    "access": "/var/log/xray/vless-login.log",
+    "error": "/var/log/xray/vless-error.log",
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 80,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${uuid}"
+#xray-vless-nontls
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/gandring",
+          "headers": {
+            "Host": ""
+          }
+         },
+        "quicSettings": {},
+        "sockopt": {
+          "mark": 0,
+          "tcpFastOpen": true
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
+      },
+      "domain": "$domain"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  }
 }
+END
+cat > /etc/xray/vless-grpc.json <<END
+{
+  "log": {
+    "access": "/var/log/xray/vless-grpc-login.log",
+    "error": "/var/log/xray/vless-grpc-error.log",
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 24468,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      },
+      "tag": "api"
+    },
+    {
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${uuid}"
+#xray-vless-grpc
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/xray/xray.crt",
+              "keyFile": "/etc/xray/xray.key"
+            }
+          ],
+          "alpn": [
+            "h2"
+          ]
+        },
+        "tcpSettings": {},
+        "kcpSettings": {},
+        "wsSettings": {},
+        "httpSettings": {},
+        "quicSettings": {},
+        "grpcSettings": {
+          "serviceName": "gandring"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
+      },
+      "domain": "${domain}"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      },
+      {
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api",
+        "type": "field"
+      }
+    ]
+  },
+  "stats": {},
+  "api": {
+    "services": [
+      "StatsService"
+    ],
+    "tag": "api"
+  },
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true
+    }
+  }
+}
+cat > /etc/xray/trojan.json <<END
+{
+  "log": {
+    "access": "/var/log/xray/trojan-login.log",
+    "error": "/var/log/xray/trojan-error.log",
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 2087,
+      "protocol": "trojan",
+      "settings": {
+        "clients": [
+          {
+            "password": "${uuid}"
+#xray-trojan
+          }
+        ],
+        "fallbacks": [
+          {
+            "dest": 80
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "/etc/xray/xray.crt",
+              "keyFile": "/etc/xray/xray.key"
+            }
+          ],
+          "alpn": [
+            "http/1.1"
+          ]
+        },
+        "sockopt": {
+          "mark": 0,
+          "tcpFastOpen": true
+        }
+      },
+      "domain": "$domain"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.0.0.0/24",
+          "192.0.2.0/24",
+          "192.168.0.0/16",
+          "198.18.0.0/15",
+          "198.51.100.0/24",
+          "203.0.113.0/24",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "outboundTag": "blocked",
+        "protocol": [
+          "bittorrent"
+        ]
+      }
+    ]
+  }
+}
+END
 
-function setup_xray_service() {
-    info "Membuat systemd service untuk Xray..."
-    cat > /etc/systemd/system/xray.service <<EOF
+# / / Installation V2Ray Service
+cat > /etc/systemd/system/xray@.service << END
 [Unit]
-Description=Xray Service
+Description=Xray Service ( %i ) By gandring
+Documentation=https://raw.githubusercontent.com/Gandring15/vps/main/
 After=network.target nss-lookup.target
 
 [Service]
-User=nobody
+Type=simple
+StandardError=journal
+PIDFile=/etc/xray/xray.pid
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-ExecStart=/usr/local/bin/xray -config /usr/local/etc/xray/config.json
+ExecStart=/usr/local/bin/xray -config /etc/xray/%i.json
+ExecStop=/usr/local/bin/xray
+LimitNOFILE=65535
 Restart=on-failure
-RestartSec=10
+RestartSec=1s
 
 [Install]
 WantedBy=multi-user.target
-EOF
+END
 
-    systemctl daemon-reload
-    systemctl enable xray
-    systemctl start xray
 
-    info "Xray service telah dijalankan."
+# // Enable & Start Service
+# Accept port Xray
+iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 2096 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 2096 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 80 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 80 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 443 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 443 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 2095 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 2095 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 2087 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 2087 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 2053 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p tcp --dport 2053 -j ACCEPT
+iptables-save > /etc/iptables.up.rules
+iptables-restore -t < /etc/iptables.up.rules
+netfilter-persistent save
+netfilter-persistent reload
+systemctl daemon-reload
+systemctl stop xray@v2ray-tls
+systemctl stop xray@v2ray-nontls
+systemctl stop xray@vless-tls
+systemctl stop xray@vless-nontls
+systemctl stop xray@trojan
+systemctl start xray@v2ray-tls 
+systemctl start xray@v2ray-nontls 
+systemctl start xray@vless-tls 
+systemctl start xray@vless-nontls 
+systemctl start xray@trojan
+systemctl start xray@vless-grpc 
+systemctl enable xray@v2ray-tls
+systemctl enable xray@v2ray-nontls
+systemctl enable xray@vless-tls
+systemctl enable xray@vless-nontls
+systemctl enable xray@trojan
+systemctl enable xray@vless-grpc
+systemctl restart xray@v2ray-tls
+systemctl restart xray@v2ray-nontls
+systemctl restart xray@vless-tls
+systemctl restart xray@vless-nontls
+systemctl restart xray@trojan
+systemctl restart xray@vless-grpc
+# Install Trojan Go
+latest_version="$(curl -s "https://api.github.com/repos/p4gefau1t/trojan-go/releases" | grep tag_name | sed -E 's/.*"v(.*)".*/\1/' | head -n 1)"
+trojango_link="https://github.com/p4gefau1t/trojan-go/releases/download/v${latest_version}/trojan-go-linux-amd64.zip"
+mkdir -p "/usr/bin/trojan-go"
+mkdir -p "/etc/trojan-go"
+cd `mktemp -d`
+curl -sL "${trojango_link}" -o trojan-go.zip
+unzip -q trojan-go.zip && rm -rf trojan-go.zip
+mv trojan-go /usr/local/bin/trojan-go
+chmod +x /usr/local/bin/trojan-go
+mkdir /var/log/trojan-go/
+touch /etc/trojan-go/akun.conf
+touch /etc/trojan-go/trojan-go.pid
+touch /var/log/trojan-go/trojan-go.log
+
+# Buat Config Trojan Go
+cat > /etc/trojan-go/config.json << END
+{
+  "run_type": "server",
+  "local_addr": "0.0.0.0",
+  "local_port": 2053,
+  "remote_addr": "127.0.0.1",
+  "remote_port": 88,
+  "log_level": 1,
+  "log_file": "/var/log/trojan-go/trojan-go.log",
+ "password": [
+      "$uuid"
+  ],
+  },
+  "disable_http_check": true,
+  "udp_timeout": 60,
+  "ssl": {
+    "verify": false,
+    "verify_hostname": false,
+    "cert": "/etc/xray/xray.crt",
+    "key": "/etc/xray/xray.key",
+    "key_password": "",
+    "cipher": "",
+    "curves": "",
+    "prefer_server_cipher": false,
+    "sni": "$domain",
+    "alpn": [
+      "http/1.1"
+    ],
+    "session_ticket": true,
+    "reuse_session": true,
+    "plain_http_response": "",
+    "fallback_addr": "127.0.0.1",
+    "fallback_port": 0,
+    "fingerprint": "firefox"
+  },
+  "tcp": {
+    "no_delay": true,
+    "keep_alive": true,
+    "prefer_ipv4": true
+  },
+  "mux": {
+    "enabled": false,
+    "concurrency": 8,
+    "idle_timeout": 60
+  },
+  "websocket": {
+    "enabled": true,
+    "path": "/gandring",
+    "host": "$domain"
+  },
+    "api": {
+    "enabled": false,
+    "api_addr": "",
+    "api_port": 0,
+    "ssl": {
+      "enabled": false,
+      "key": "",
+      "cert": "",
+      "verify_client": false,
+      "client_cert": []
+    }
+  }
 }
+END
 
-function setup_firewall() {
-    info "Mengatur iptables untuk membuka port..."
-    iptables -F
-    iptables -t nat -F
+# Installing Trojan Go Service
+cat > /etc/systemd/system/trojan-go.service << END
+[Unit]
+Description=Trojan-Go Service By gandring
+Documentation=https://github.com/Gandring15/vps/main/
+Documentation=https://github.com/Gandring15/vps/main/
+After=network.target nss-lookup.target
 
-    # Izinkan port TCP yang penting
-    for port in 22 80 443 65535 7300 7100; do
-        iptables -A INPUT -p tcp --dport $port -j ACCEPT
-        iptables -A INPUT -p udp --dport $port -j ACCEPT
-    done
+[Service]
+Type=simple
+StandardError=journal
+PIDFile=/etc/trojan-go/trojan-go.pid
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/trojan-go -config /etc/trojan-go/config.json
+LimitNOFILE=65535
+Restart=on-failure
+RestartSec=1s
 
-    # Buka established connections & loopback
-    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    iptables -A INPUT -i lo -j ACCEPT
+[Install]
+WantedBy=multi-user.target
+END
 
-    # Drop semua selain yang diijinkan
-    iptables -P INPUT DROP
+# Trojan Go Uuid
+cat > /etc/trojan-go/uuid.txt << END
+$uuid
+END
 
-    netfilter-persistent save
+# restart
+iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport 2053 -j ACCEPT
+iptables -I INPUT -m state --state NEW -m udp -p udp --dport 2053 -j ACCEPT
+iptables-save > /etc/iptables.up.rules
+iptables-restore -t < /etc/iptables.up.rules
+netfilter-persistent save
+netfilter-persistent reload
+systemctl daemon-reload
+systemctl stop trojan-go
+systemctl start trojan-go
+systemctl enable trojan-go
+systemctl restart trojan-go
 
-    info "Firewall telah disetup dengan aturan iptables."
-}
-
-function main() {
-    cek_root
-
-    echo "Anda akan menginstall XRAY Manager pada VPS Ubuntu 22/23/24."
-    read -rp "Masukkan domain yang sudah diarahkan ke VPS (ex: domainanda.com): " DOMAIN
-    read -rp "Masukkan email untuk sertifikat SSL (Let's Encrypt): " EMAIL
-
-    if [[ -z "$DOMAIN" || -z "$EMAIL" ]]; then
-        error "Domain dan email tidak boleh kosong."
-        exit 1
-    fi
-
-    install_dependencies
-    install_xray
-    setup_nginx
-    setup_certbot_tls || warning "Lewati pemasangan TLS jika gagal."
-    setup_xray_config
-    setup_xray_service
-    setup_firewall
-
-    info ""
-    echo "=== INSTALASI XRAY MANAGER SELESAI ==="
-    echo "- Domain      : $DOMAIN"
-    echo "- Email TLS   : $EMAIL"
-    echo "- UUID VLESS  : $(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)"
-    echo "- UUID VMess  : $(jq -r '.inbounds[1].settings.clients[0].id' /usr/local/etc/xray/config.json)"
-    echo "- Trojan Pass : trojanpass123"
-    echo "Pastikan aplikasi client diset sesuai:"
-    echo "- VLESS TLS WS: path /vless port 443"
-    echo "- VMess WS     : path /vmess port 10000"
-    echo "- VMess TCP   : port 65535"
-    echo "- VLESS TCP   : port 7300"
-    echo "- Trojan TCP  : port 7100"
-    echo ""
-    echo "Gunakan 'systemctl status xray' atau 'journalctl -u xray' untuk cek status."
-    echo ""
-    read -rp "Tekan ENTER untuk kembali ke menu..."
-}
-
-main
+cd
+mv /root/domain /etc/xray
